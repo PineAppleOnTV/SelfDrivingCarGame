@@ -1,5 +1,6 @@
 import pygame
 import pygame.surfarray as surfarray
+import numpy as np
 from settings import *
 
 class Track:
@@ -28,6 +29,29 @@ class Track:
 
         pixel_color = self.pixels[ix, iy]
         return self._colors_close(pixel_color)
+
+    def is_on_track_batch(self, xs, ys):
+        """
+        Vectorized version of is_on_track - takes arrays of x, y coordinates
+        and returns a boolean array, one result per point, computed in one
+        numpy operation instead of one Python call per point.
+        """
+        width, height = self.image.get_size()
+        ix = xs.astype(int)
+        iy = ys.astype(int)
+
+        in_bounds = (ix >= 0) & (iy >= 0) & (ix < width) & (iy < height)
+
+        # Clip so out-of-bounds indices don't crash the lookup - their
+        # result gets overwritten to False by in_bounds afterward anyway.
+        ix_safe = np.clip(ix, 0, width - 1)
+        iy_safe = np.clip(iy, 0, height - 1)
+
+        pixel_colors = self.pixels[ix_safe, iy_safe]  # shape (N, 3)
+        target = np.array(self.track_color)
+        close = np.all(np.abs(pixel_colors.astype(int) - target) <= self.tolerance, axis=1)
+
+        return close & in_bounds
 
     def _colors_close(self, pixel_color):
         """Compares if the color is close to the track color"""
