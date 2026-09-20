@@ -176,7 +176,8 @@ def _segment_index_ranges(segments: List[_Segment], sample_step: float) -> List[
 
 def _pre_corner_swing_bias(segments: List[_Segment], sample_step: float, max_offset: float,
                             swing_distance: float, swing_strength: float,
-                            turn_in_distance: float) -> List[float]:
+                            turn_in_distance: float,
+                            excluded_indices: Optional[set] = None) -> List[float]:
     """An extra, persistent lateral pull applied only in the last
     `swing_distance` pixels of a plain straight/crossing that leads directly
     into a corner - it nudges the line toward the OUTSIDE of that corner
@@ -191,7 +192,12 @@ def _pre_corner_swing_bias(segments: List[_Segment], sample_step: float, max_off
     over that last stretch, so the line has already started turning back in
     before it actually reaches the corner, instead of being held hard on
     the outside and then having to snap to the apex all at once.
-    turn_in_distance is clamped to stay smaller than swing_distance."""
+    turn_in_distance is clamped to stay smaller than swing_distance.
+
+    If the push's window would cover any index in `excluded_indices` (e.g.
+    the start-line anchor), that corner is skipped entirely rather than
+    fighting a fixed point - a corner that happens to fall shortly after the
+    start just doesn't get the outward push."""
     n_seg = len(segments)
     ranges = _segment_index_ranges(segments, sample_step)
     total_points = ranges[-1][0] + ranges[-1][1]
@@ -199,6 +205,7 @@ def _pre_corner_swing_bias(segments: List[_Segment], sample_step: float, max_off
     if swing_strength <= 0 or swing_distance <= 0:
         return bias
     turn_in_distance = max(0.0, min(turn_in_distance, swing_distance * 0.95))
+    excluded_indices = excluded_indices or set()
 
     def ease(x):
         x = max(0.0, min(1.0, x))
@@ -214,6 +221,10 @@ def _pre_corner_swing_bias(segments: List[_Segment], sample_step: float, max_off
         prev_start, prev_count = ranges[prev_i]
         step = prev_seg.length / prev_count
         n_window = max(2, min(prev_count, int(round(swing_distance / step))))
+        window_start = prev_start + prev_count - n_window
+        window_end = prev_start + prev_count - 1
+        if any(window_start <= idx <= window_end for idx in excluded_indices):
+            continue  # this corner's approach overlaps a fixed point (e.g. the start anchor) - skip it
         n_turn_in = max(1, min(n_window - 1, int(round(turn_in_distance / step))))
         for k in range(n_window):
             idx = prev_start + prev_count - n_window + k
@@ -392,16 +403,18 @@ def generate_checkpoints(
     segments = _build_segments(result, cfg)
     points = _build_fine_centerline(segments, sample_step)
     max_offset = max(0.0, aggressiveness) * max(0.0, cfg.track_width / 2.0 - safety_margin)
-    bias = _pre_corner_swing_bias(segments, sample_step, max_offset,
-                                   pre_corner_swing_distance, pre_corner_swing,
-                                   pre_corner_turn_in_distance)
-    linear_ranges = _crossing_linear_ranges(segments, result, sample_step)
 
     # The start line is a fixed, physical mark drawn at the exact centre of
     # the start straight - anchor the racing line to sit exactly on the
     # centerline right there, regardless of aggressiveness.
     seg0_start, seg0_count = _segment_index_ranges(segments, sample_step)[0]
     mid_idx = seg0_start + seg0_count // 2
+
+    bias = _pre_corner_swing_bias(segments, sample_step, max_offset,
+                                   pre_corner_swing_distance, pre_corner_swing,
+                                   pre_corner_turn_in_distance,
+                                   excluded_indices={mid_idx})
+    linear_ranges = _crossing_linear_ranges(segments, result, sample_step)
 
     offsets = _relax_offsets(points, max_offset, iterations=smoothing_iterations, bias=bias,
                               fixed={mid_idx: 0.0}, linear_ranges=linear_ranges)

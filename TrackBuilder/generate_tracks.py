@@ -63,7 +63,7 @@ RACING_LINE_AGGRESSIVENESS = 0.4
 
 # Pixels of clearance kept between the racing line and the lane border at
 # full (1.0) aggressiveness.
-CHECKPOINT_SAFETY_MARGIN = 6.0
+CHECKPOINT_SAFETY_MARGIN = 2.0
 
 # How hard (0 = off, fraction of the max lateral offset) the line swings
 # toward the OUTSIDE of a corner in the straight immediately before it -
