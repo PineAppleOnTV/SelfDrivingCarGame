@@ -23,7 +23,7 @@ class Track:
         width, heigth = self.image_size
         ix, iy = int(x), int(y)
 
-        if ix < 0 or iy < 0 or ix > width or iy > heigth:
+        if ix < 0 or iy < 0 or ix >= width or iy >= heigth:
             return False
 
         pixel_color = self.pixels[ix, iy]
@@ -32,7 +32,8 @@ class Track:
     def _colors_close(self, pixel_color):
         """Compares if the color is close to the track color"""
         return all(
-            abs(pixel_color[i] - self.track_color[i]) <= self.tolerance for i in range(3)
+            abs(int(pixel_color[i]) - int(self.track_color[i])) <= self.tolerance
+            for i in range(3)
         )
 
     def draw(self, screen):

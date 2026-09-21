@@ -1,7 +1,11 @@
 """
 track_render.py
 ================
-Turns a GenResult (from track_generator.py) into a white/black PNG image.
+Turns a GenResult (from track_generator.py) into a black/white(-ish) PNG
+image. The drivable lane surface is pure white (255,255,255); everywhere
+else (background, and the non-lane parts of each tile) is (254,254,254) -
+visually identical, but a plain pixel-colour check tells you whether a
+point is on the track or not.
 """
 
 from typing import Dict, Tuple, Optional
@@ -10,6 +14,11 @@ from PIL import Image, ImageDraw
 from track_generator import TrackConfig, GenResult, DELTA
 
 WHITE = (255, 255, 255)
+# Everything that ISN'T the drivable lane surface (background, and the
+# non-lane parts of every tile) is this near-white instead of pure white,
+# so "is this pixel on track?" is a plain, exact colour check: (255,255,255)
+# = on the lane, (254,254,254) = off it. The two are visually indistinguishable.
+BACKGROUND = (254, 254, 254)
 BLACK = (0, 0, 0)
 
 # Which tile-corner a corner piece pivots around, and the angle range of its
@@ -26,7 +35,7 @@ _CORNER_GEOMETRY = {
 
 def _blank_tile(cfg: TrackConfig) -> Image.Image:
     s = cfg.cell_size
-    return Image.new("RGB", (s, s), WHITE)
+    return Image.new("RGB", (s, s), BACKGROUND)
 
 
 def _band(center: float, bw: int) -> Tuple[int, int]:
@@ -53,6 +62,7 @@ def draw_straight_h(cfg: TrackConfig) -> Image.Image:
     x1 = s - gap
     top = m                    # inner edge of the lane band (== corner inner radius)
     bot = m + cfg.track_width  # outer edge of the lane band
+    d.rectangle([x0, top, x1, bot], fill=WHITE)  # the drivable lane surface
     top_lo, top_hi = _band(top, bw)
     bot_lo, bot_hi = _band(bot, bw)
     d.rectangle([x0, top_lo, x1, top_hi], fill=BLACK)
@@ -77,6 +87,11 @@ def draw_corner(cfg: TrackConfig, pair: frozenset) -> Image.Image:
 
     def bbox(r):
         return [px - r, py - r, px + r, py + r]
+
+    # the drivable lane surface: the annular band between r_in and r_out,
+    # restricted to this corner's 90-degree sector
+    d.pieslice(bbox(r_out), start_angle, end_angle, fill=WHITE)
+    d.pieslice(bbox(r_in), start_angle, end_angle, fill=BACKGROUND)
 
     # A clean, uniformly-thick arc band is drawn as the difference of two
     # filled pie slices (same pivot & angles) rather than ImageDraw.arc's
@@ -105,6 +120,9 @@ def draw_crossing(cfg: TrackConfig) -> Image.Image:
     bw = cfg.border_width
     lo = m               # inner edge of the lane band (same as a straight/corner)
     hi = m + tw          # outer edge of the lane band
+    # the drivable lane surface: the '+' shape (both bands, full width/height)
+    d.rectangle([0, lo, s, hi], fill=WHITE)
+    d.rectangle([lo, 0, hi, s], fill=WHITE)
     lo_lo, lo_hi = _band(lo, bw)
     hi_lo, hi_hi = _band(hi, bw)
 
@@ -167,7 +185,7 @@ def assemble_track(
     from any absolute canvas coordinates (e.g. from track_path checkpoints,
     via track_path.offset_checkpoints) to match this image."""
     s = cfg.cell_size
-    canvas = Image.new("RGB", (result.cols * s, result.rows * s), WHITE)
+    canvas = Image.new("RGB", (result.cols * s, result.rows * s), BACKGROUND)
 
     straight_h = draw_straight_h(cfg)
     straight_v = _rotated(straight_h, 90)

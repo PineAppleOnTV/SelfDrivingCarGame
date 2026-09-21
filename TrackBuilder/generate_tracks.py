@@ -51,7 +51,7 @@ CHECKPOINTS_DIR = os.path.join(OUTPUT_DIR, "checkpoints")  # all checkpoint CSVs
 GENERATE_CHECKPOINTS = True
 
 # Distance in pixels between consecutive checkpoints along the path.
-CHECKPOINT_INTERVAL = 20.0
+CHECKPOINT_INTERVAL = 35.0
 
 # 0 = plain centerline down the middle of the lane. 1 = allowed to roam as
 # close to the lane edges as CHECKPOINT_SAFETY_MARGIN permits. Crossings
@@ -59,18 +59,22 @@ CHECKPOINT_INTERVAL = 20.0
 # value - a crossing is geometrically a straight line, never an arc, so it
 # is physically impossible for the path to turn there - but its lateral
 # position is still free to drift smoothly through it.
-RACING_LINE_AGGRESSIVENESS = 0.4
+RACING_LINE_AGGRESSIVENESS = 0.6
 
 # Pixels of clearance kept between the racing line and the lane border at
 # full (1.0) aggressiveness.
-CHECKPOINT_SAFETY_MARGIN = 2.0
+CHECKPOINT_SAFETY_MARGIN = 3.0
 
 # How hard (0 = off, fraction of the max lateral offset) the line swings
 # toward the OUTSIDE of a corner in the straight immediately before it -
 # the classic "out" before the "in". Only ever kicks in on a plain,
 # sufficiently long straight/crossing approach - never between corners in a
-# chicane, so it can't reintroduce apex-chasing zig-zag there.
-PRE_CORNER_SWING = 0.3
+# chicane, so it can't reintroduce apex-chasing zig-zag there. Since this and
+# CORNER_APEX_BIAS below are both now exact, forced values rather than an
+# addition to the baseline, keep them roughly comparable in size (e.g. both
+# around 0.6-0.9) if you want a visible, symmetric "out, then in" - a weak
+# swing next to a strong apex bias will look like it barely swings out at all.
+PRE_CORNER_SWING = 0.7
 PRE_CORNER_SWING_DISTANCE = 80.0  # pixels before the corner this ramps up over
 
 # How many pixels before the corner the outward push has fully eased off
@@ -78,11 +82,11 @@ PRE_CORNER_SWING_DISTANCE = 80.0  # pixels before the corner this ramps up over
 # the corner instead of holding the outside line right up to the apex and
 # snapping in all at once. Always kept smaller than PRE_CORNER_SWING_DISTANCE
 # (clamped automatically if set too close to it).
-PRE_CORNER_TURN_IN_DISTANCE = 25.0
+PRE_CORNER_TURN_IN_DISTANCE = 65.0
 
 # Checkpoint 0 sits at the middle of the start straight, shifted backward
 # (against the direction of travel) by this many pixels.
-CHECKPOINT_START_OFFSET = 20.0
+CHECKPOINT_START_OFFSET = 40.0
 
 # Also save a PNG with the racing line + checkpoints drawn on top, so you can
 # eyeball them.
@@ -90,13 +94,13 @@ SAVE_CHECKPOINT_PREVIEW = True
 
 # Piece geometry - all pixel values, all independently adjustable.
 CONFIG = TrackConfig(
-    track_width=53,
-    border_width=2,
-    straight_length=67,  # == 2*corner_inner_radius + track_width -> seamless joints
-    corner_inner_radius=7,
-    start_mark_width=7,
-    start_mark_length=2,
-    start_mark_gap=4,
+    track_width=106,
+    border_width=4,
+    straight_length=134,  # == 2*corner_inner_radius + track_width -> seamless joints
+    corner_inner_radius=14,
+    start_mark_width=14,
+    start_mark_length=4,
+    start_mark_gap=8,
 )
 
 # ---------------------------------------------------------------------------
