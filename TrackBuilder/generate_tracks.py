@@ -24,7 +24,7 @@ PIECE_COUNTS = {
 }
 
 # How many different track layouts to generate.
-NUM_VARIANTS = 4
+NUM_VARIANTS = 8
 
 # Size of the grid tracks are laid out on (rows, cols). Leave as None to let
 # it size itself based on PIECE_COUNTS.
@@ -94,13 +94,13 @@ SAVE_CHECKPOINT_PREVIEW = True
 
 # Piece geometry - all pixel values, all independently adjustable.
 CONFIG = TrackConfig(
-    track_width=106,
+    track_width=102,
     border_width=4,
-    straight_length=134,  # == 2*corner_inner_radius + track_width -> seamless joints
+    straight_length=130,  # == 2*corner_inner_radius + track_width -> seamless joints
     corner_inner_radius=14,
-    start_mark_width=14,
+    start_mark_width=18,
     start_mark_length=4,
-    start_mark_gap=8,
+    start_mark_gap=12,
 )
 
 # ---------------------------------------------------------------------------

@@ -50,9 +50,9 @@ from PIL import Image, ImageDraw
 
 @dataclass
 class TrackConfig:
-    track_width: int = 53          # width of the white lane
+    track_width: int = 51          # width of the white lane
     border_width: int = 2          # thickness of the black border line
-    straight_length: int = 63      # length of a straight piece (direction of travel)
+    straight_length: int = 71      # length of a straight piece (direction of travel)
     corner_inner_radius: int = 7   # radius from the pivot to the INSIDE edge of the lane
 
     # start / finish marker: two short black bars across the lane
