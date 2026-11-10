@@ -23,28 +23,29 @@ either a straight line (straight or crossing piece) or a circular arc
 (corner piece, radius = corner_inner_radius + track_width/2, sweeping 90
 degrees around the same pivot used to draw the piece).
 
-The racing line itself is built by relaxation, not a hand-picked target per
-corner: the centerline is sampled finely all the way around the loop, each
-sample point is given a lateral degree of freedom (how far it may move
-sideways, up to `aggressiveness` x the safety margin), and then each point
-is repeatedly pulled toward the midpoint of its two neighbours (clamped to
-its allowed range) for a few hundred iterations. This is a standard, simple
-curvature-reducing relaxation: pulling a point toward the chord between its
-neighbours is exactly what straightens a curve out, and because it only
-ever looks at *local* neighbours, it naturally produces the right emergent
-behaviour without any special-casing:
-  - it cuts to the inside of an isolated corner (a chord across an arc
-    always falls inside the arc),
-  - it drifts wide beforehand if that makes the overall path straighter,
-  - and for a tight run of alternating corners (a chicane) it settles on a
-    straighter compromise path instead of snapping to every apex, since
-    zig-zagging to each apex is exactly the high-curvature situation this
-    relaxation smooths away.
+The racing line is found by optimisation over the whole loop at once, not
+by a hand-picked rule per corner. The centerline is sampled all the way
+around, each sample may slide sideways (up to `aggressiveness` x the usable
+half-width), and the offsets that minimise
+
+    (total squared curvature)  +  corner_cut * (path length)
+      + soft outside/inside preferences per turn (see below)
+
+are found with a coarse-to-fine solver (so it converges globally, not just
+locally). On top of that, every "turn" (corners turning the same way with
+at most one short straight between them) gets soft F1-style preferences:
+back to the middle of the road after it, out to the outside shortly before
+the next one, and a gentle pull to the inside halfway through. So:
+  - a single corner or a U-turn gets outside -> inside apex -> outside,
+  - a diagonal "staircase" of alternating corners is driven as a straight
+    diagonal through the middle instead of chasing every apex,
+  - an S-bend / chicane, or a short straight between a left and a right
+    turn, gets the straightest middle-of-the-road compromise.
 """
 
 import math
 from dataclasses import dataclass
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict
 
 from track_generator import (
     TrackConfig, GenResult, DELTA, OPPOSITE, LEFT_OF, RIGHT_OF, AXIS,
@@ -174,69 +175,6 @@ def _segment_index_ranges(segments: List[_Segment], sample_step: float) -> List[
     return ranges
 
 
-def _pre_corner_swing_bias(segments: List[_Segment], sample_step: float, max_offset: float,
-                            swing_distance: float, swing_strength: float,
-                            turn_in_distance: float,
-                            excluded_indices: Optional[set] = None) -> List[float]:
-    """An extra, persistent lateral pull applied only in the last
-    `swing_distance` pixels of a plain straight/crossing that leads directly
-    into a corner - it nudges the line toward the OUTSIDE of that corner
-    beforehand (classic "out" before the "in"). It's deliberately *not*
-    applied when the preceding piece is itself a corner (a chicane), so it
-    can never fight the chicane-straightening behaviour - it only ever
-    kicks in when there's a plain, generous straight approach to swing
-    across in the first place.
-
-    The push isn't held at full strength all the way to the corner: it
-    peaks `turn_in_distance` pixels before the corner and eases back off
-    over that last stretch, so the line has already started turning back in
-    before it actually reaches the corner, instead of being held hard on
-    the outside and then having to snap to the apex all at once.
-    turn_in_distance is clamped to stay smaller than swing_distance.
-
-    If the push's window would cover any index in `excluded_indices` (e.g.
-    the start-line anchor), that corner is skipped entirely rather than
-    fighting a fixed point - a corner that happens to fall shortly after the
-    start just doesn't get the outward push."""
-    n_seg = len(segments)
-    ranges = _segment_index_ranges(segments, sample_step)
-    total_points = ranges[-1][0] + ranges[-1][1]
-    bias = [0.0] * total_points
-    if swing_strength <= 0 or swing_distance <= 0:
-        return bias
-    turn_in_distance = max(0.0, min(turn_in_distance, swing_distance * 0.95))
-    excluded_indices = excluded_indices or set()
-
-    def ease(x):
-        x = max(0.0, min(1.0, x))
-        return (1 - math.cos(x * math.pi)) / 2.0
-
-    for i, seg in enumerate(segments):
-        if seg.move.kind != "arc":
-            continue
-        prev_i = (i - 1) % n_seg
-        prev_seg = segments[prev_i]
-        if prev_seg.move.kind != "line" or prev_seg.length < swing_distance * 0.8:
-            continue  # only swing out of a plain, sufficiently long straight
-        prev_start, prev_count = ranges[prev_i]
-        step = prev_seg.length / prev_count
-        n_window = max(2, min(prev_count, int(round(swing_distance / step))))
-        window_start = prev_start + prev_count - n_window
-        window_end = prev_start + prev_count - 1
-        if any(window_start <= idx <= window_end for idx in excluded_indices):
-            continue  # this corner's approach overlaps a fixed point (e.g. the start anchor) - skip it
-        n_turn_in = max(1, min(n_window - 1, int(round(turn_in_distance / step))))
-        for k in range(n_window):
-            idx = prev_start + prev_count - n_window + k
-            d = n_window - 1 - k  # steps before the corner: 0 = at the corner, larger = farther back
-            if d >= n_turn_in:
-                frac = (n_window - 1 - d) / max(1, n_window - 1 - n_turn_in)  # 0 (far) -> 1 (at turn-in point)
-            else:
-                frac = d / n_turn_in  # 1 (at turn-in point) -> 0 (right at the corner)
-            bias[idx] += -seg.turn_sign * swing_strength * max_offset * ease(frac)
-    return bias
-
-
 def _crossing_linear_ranges(segments: List[_Segment], result: GenResult, sample_step: float
                              ) -> List[Tuple[int, int]]:
     """[start, count) fine-point ranges belonging to a crossing piece - used
@@ -252,66 +190,276 @@ def _crossing_linear_ranges(segments: List[_Segment], result: GenResult, sample_
     return out
 
 
-def _relax_offsets(points: List[Tuple[float, float, float, float]], max_offset: float,
-                    iterations: int = 400, damping: float = 0.5,
-                    bias: Optional[List[float]] = None,
-                    fixed: Optional[Dict[int, float]] = None,
-                    linear_ranges: Optional[List[Tuple[int, int]]] = None) -> List[float]:
-    """Repeatedly pulls each point toward the midpoint of its two neighbours
-    (projected onto that point's own lateral freedom), plus an optional
-    fixed `bias` term (see _pre_corner_swing_bias), clamped to
-    [-max_offset, max_offset]. The neighbour-pulling part is a standard
-    curvature-reducing relaxation - it's what makes the line cut corners,
-    and flatten out chicanes, as one emergent behaviour, since pulling a
-    point toward the chord between its neighbours is exactly what
-    straightens a curve out.
+def _centerline_arclength(segments: List[_Segment], sample_step: float) -> List[float]:
+    """Centerline distance from the loop start for every point produced by
+    _build_fine_centerline at this sample_step (same layout)."""
+    s_vals = []
+    s0 = 0.0
+    for seg in segments:
+        n_steps = max(1, int(math.ceil(seg.length / sample_step)))
+        for k in range(n_steps):
+            s_vals.append(s0 + seg.length * k / n_steps)
+        s0 += seg.length
+    return s_vals
 
-    `fixed`: {index: offset} - these points never move (used to anchor the
-    start line exactly on the centerline).
-    `linear_ranges`: [(start, count), ...] - the *interior* points of each
-    range (excluding its own two endpoints) are held to a straight-line
-    interpolation between those endpoints instead of being pulled by their
-    immediate neighbours - used to make crossings behave as a single
-    straight from wherever they're entered to wherever they're exited."""
+
+def _turn_groups(segments: List[_Segment], merge_gap: float):
+    """Groups corners into "turns": consecutive corners turning the same way,
+    with at most `merge_gap` px of straight between them, form one turn (e.g.
+    a U-turn made of corner + short straight + corner). Returns a list of
+    (first_seg, last_seg) segment indices (last may wrap past the end)."""
+    n_seg = len(segments)
+    arcs = [i for i, s in enumerate(segments) if s.move.kind == "arc"]
+    if not arcs:
+        return []
+
+    def joins(a, b):  # can arc a be merged with the next arc b?
+        if segments[a].turn_sign != segments[b].turn_sign:
+            return False
+        gap, i = 0.0, (a + 1) % n_seg
+        while i != b:
+            gap += segments[i].length
+            i = (i + 1) % n_seg
+        return gap <= merge_gap
+
+    # start the walk on an arc that does NOT join its predecessor, so no
+    # group is split across the loop seam
+    m = len(arcs)
+    start = next((k for k in range(m) if not joins(arcs[k - 1], arcs[k])), 0)
+    order = [arcs[(start + k) % m] for k in range(m)]
+    groups = [[order[0], order[0]]]
+    for a in order[1:]:
+        if joins(groups[-1][1], a):
+            groups[-1][1] = a
+        else:
+            groups.append([a, a])
+    return [tuple(g) for g in groups]
+
+
+def _turn_targets(segments: List[_Segment], points, step: float, max_offset: float,
+                  distance: float, peak_before: float, anchor: int, merge_gap: float,
+                  apex_strength: float = 0.1, settle_distance: float = 100.0):
+    """Soft racing-line preferences per turn (see _turn_groups):
+      - after a turn: the line is pulled back to the MIDDLE of the road
+        (eases in over `settle_distance` px, so the exit itself stays smooth)
+        and stays there along the straight,
+      - entry: from `distance` px before the next turn the middle pull hands
+        over to a pull toward the OUTSIDE of that turn (strongest
+        `peak_before` px before it, letting go at the turn-in point),
+      - apex: a gentle pull to the INSIDE halfway through the whole turn (so
+        a U-turn gets one apex, not two).
+    Turns that run straight into a corner of the opposite direction (S-bends,
+    diagonal staircases) get no outside/apex pull, and a short straight
+    between a left and a right turn only gets the middle pull, so those keep
+    a straightened, middle-of-the-road line.
+    Returns (weights, targets) arrays, one entry per point."""
+    import numpy as np
     n = len(points)
-    if n < 3 or max_offset <= 0:
-        return [0.0] * n
-    offsets = [0.0] * n
-    bias = bias or [0.0] * n
-    fixed = fixed or {}
-    for idx, val in fixed.items():
-        offsets[idx] = val
+    zeros = np.zeros(n)
+    if distance <= 0 or max_offset <= 0:
+        return zeros, zeros.copy()
+    peak_before = max(0.0, min(peak_before, distance * 0.95))
 
-    linear_interior: Dict[int, Tuple[int, int]] = {}
-    for start, count in (linear_ranges or []):
-        if count >= 3:
-            end = start + count - 1
-            for k in range(start + 1, end):
-                linear_interior[k] = (start, end)
+    ranges = _segment_index_ranges(segments, step)
+    seg_of = np.empty(n, dtype=int)
+    for si, (start, count) in enumerate(ranges):
+        seg_of[start:start + count] = si
+    n_seg = len(segments)
 
-    pos = [(cx, cy) for cx, cy, nx, ny in points]
-    for idx, val in fixed.items():
-        cx, cy, nx, ny = points[idx]
-        pos[idx] = (cx + val * nx, cy + val * ny)
+    def ease(x):
+        x = max(0.0, min(1.0, x))
+        return (1 - math.cos(x * math.pi)) / 2.0
 
+    anchor_fade = 1.5 * distance
+
+    def anchor_factor(idx):
+        # fade the outside pull near the start line (pinned to the centre), so
+        # the line leaves/arrives there with a gentle drift instead of a kink
+        k = (idx - anchor) % n
+        return ease(min(k, n - k) * step / anchor_fade)
+
+    def entry_weight(d):  # d = px before the turn
+        if d >= peak_before:
+            return ease((distance - d) / max(1e-9, distance - peak_before))
+        return ease(d / max(1e-9, peak_before))
+
+    def inside_vec(arc_pt):  # direction from an arc point toward its corner's pivot
+        seg = segments[seg_of[arc_pt]]
+        return (seg.pivot[0] - points[arc_pt][0], seg.pivot[1] - points[arc_pt][1])
+
+    def side(idx, ref_arc_pt):
+        """+1 if a positive offset at idx moves toward the inside of the corner
+        that ref_arc_pt (an adjacent arc point) belongs to, else -1."""
+        vx, vy = inside_vec(ref_arc_pt)
+        return 1.0 if points[idx][2] * vx + points[idx][3] * vy > 0 else -1.0
+
+    groups = _turn_groups(segments, merge_gap)
+    n_g = len(groups)
+
+    def straight_between(g_a, g_b):  # px of straight from the end of turn a to the start of turn b
+        i, total = (groups[g_a][1] + 1) % n_seg, 0.0
+        while i != groups[g_b][0]:
+            total += segments[i].length
+            i = (i + 1) % n_seg
+        return total
+
+    # A short straight between a left and a right turn: no outside pull for
+    # the second turn there, the line just keeps to the middle.
+    no_entry = set()
+    for g in range(n_g):
+        h = (g + 1) % n_g
+        if n_g > 1 and segments[groups[g][1]].turn_sign != segments[groups[h][0]].turn_sign                 and straight_between(g, h) < 2.0 * distance:
+            no_entry.add(h)
+
+    entry_w = np.zeros(n)   # outside pull before a turn
+    entry_t = np.zeros(n)
+    center_w = np.zeros(n)  # middle-of-the-road pull after a turn
+    apex_w = np.zeros(n)
+    apex_t = np.zeros(n)
+
+    for g, (first, last) in enumerate(groups):
+        entry = ranges[first][0]
+        exit_ = (ranges[last][0] + ranges[last][1]) % n
+        before = segments[(first - 1) % n_seg].move.kind
+        after = segments[(last + 1) % n_seg].move.kind
+
+        if before == "line" and g not in no_entry:  # outside on the way in
+            for k in range(1, int(distance / step) + 1):
+                idx = (entry - k) % n
+                if segments[seg_of[idx]].move.kind != "line":
+                    break
+                w = entry_weight(k * step) * anchor_factor(idx)
+                if w > entry_w[idx]:
+                    entry_w[idx] = w
+                    entry_t[idx] = -side(idx, entry) * max_offset
+        if after == "line":  # back to the middle after the turn, all along the straight
+            k = 0
+            while k < n:
+                idx = (exit_ + k) % n
+                if segments[seg_of[idx]].move.kind != "line":
+                    break
+                center_w[idx] = max(center_w[idx], ease((k + 1) * step / max(1e-9, settle_distance)))
+                k += 1
+        if before == "line" and after == "line":  # apex: gently inside, halfway through
+            span = (exit_ - entry) % n
+            for k in range(span):
+                idx = (entry + k) % n
+                u = (k + 0.5) / span
+                if segments[seg_of[idx]].move.kind == "arc":
+                    ref = idx
+                else:  # short straight inside a merged turn: use the arc just before it
+                    ref = (ranges[seg_of[idx]][0] - 1) % n
+                apex_w[idx] = apex_strength * math.sin(math.pi * u)
+                apex_t[idx] = side(idx, ref) * max_offset
+
+    # the outside pull takes over from the middle pull as the turn approaches
+    center_w *= (1.0 - entry_w)
+    w_sum = entry_w + center_w + apex_w
+    targets = np.where(w_sum > 0, (entry_w * entry_t + apex_w * apex_t) / np.maximum(w_sum, 1e-12), 0.0)
+    return w_sum, targets
+
+
+def _optimise_level(points, offsets, max_offset: float, step: float, length_weight: float,
+                    iterations: int, fixed: Dict[int, float],
+                    linear_ranges: List[Tuple[int, int]],
+                    setup_strength: float = 0.0, setup_weights=None, setup_targets=None):
+    """Projected (damped Jacobi) descent on one sampling level of
+
+        E = sum |p[i-1] - 2 p[i] + p[i+1]|^2 / step^3        (curvature^2 * ds)
+          + length_weight * sum |p[i+1] - p[i]|^2 / step     (~ path length)
+          + setup_strength * sum w[i] (o[i] - target[i])^2 * step   (wide entry)
+
+    where p[i] = centerline[i] + offset[i] * normal[i] and every offset is
+    boxed to [-max_offset, max_offset]. The objective is convex, so this
+    always settles on the single best line for the whole loop."""
+    import numpy as np
+    pts = np.asarray(points, dtype=float)
+    c = pts[:, 0:2]
+    nrm = pts[:, 2:4]
+    o = np.asarray(offsets, dtype=float).copy()
+
+    wc = 1.0 / step ** 3
+    wl = length_weight / step
+    if setup_weights is None or setup_strength <= 0:
+        ws = np.zeros(len(o))
+        tgt = np.zeros(len(o))
+    else:
+        ws = setup_strength * step * np.asarray(setup_weights, dtype=float)
+        tgt = np.asarray(setup_targets, dtype=float)
+    h = 2.0 * (6.0 * wc + 2.0 * wl) + 2.0 * ws  # exact curvature of E along each point's own normal
+    omega = 0.6                       # < 2/2.67 keeps the Jacobi sweep stable for this stencil
+
+    fixed_idx = np.array(list(fixed.keys()), dtype=int)
+    fixed_val = np.array(list(fixed.values()), dtype=float)
+    lin = [(s, s + cnt - 1) for s, cnt in linear_ranges if cnt >= 3]
+
+    def apply_constraints(o):
+        if len(fixed_idx):
+            o[fixed_idx] = fixed_val
+        for s_idx, e_idx in lin:
+            k = np.arange(s_idx + 1, e_idx)
+            t = (k - s_idx) / (e_idx - s_idx)
+            o[k] = o[s_idx] + (o[e_idx] - o[s_idx]) * t
+        return o
+
+    o = apply_constraints(np.clip(o, -max_offset, max_offset))
     for _ in range(iterations):
-        for i in range(n):
-            if i in fixed:
-                continue  # anchored - never moves
-            cx, cy, nx, ny = points[i]
-            if i in linear_interior:
-                s_idx, e_idx = linear_interior[i]
-                t = (i - s_idx) / (e_idx - s_idx)
-                target = offsets[s_idx] + (offsets[e_idx] - offsets[s_idx]) * t
-            else:
-                ip, inx = (i - 1) % n, (i + 1) % n
-                tx = (pos[ip][0] + pos[inx][0]) / 2.0
-                ty = (pos[ip][1] + pos[inx][1]) / 2.0
-                target = (tx - cx) * nx + (ty - cy) * ny + bias[i]  # project onto the normal
-            target = max(-max_offset, min(max_offset, target))
-            offsets[i] += damping * (target - offsets[i])
-            pos[i] = (cx + offsets[i] * nx, cy + offsets[i] * ny)
-    return offsets
+        p = c + o[:, None] * nrm
+        pm, pp = np.roll(p, 1, axis=0), np.roll(p, -1, axis=0)
+        d2 = pm - 2.0 * p + pp                       # D[i]
+        g_curv = np.roll(d2, 1, axis=0) - 2.0 * d2 + np.roll(d2, -1, axis=0)
+        g = 2.0 * wc * g_curv + 2.0 * wl * (2.0 * p - pm - pp)
+        g_n = np.einsum("ij,ij->i", g, nrm) + 2.0 * ws * (o - tgt)
+        o -= omega * g_n / h
+        np.clip(o, -max_offset, max_offset, out=o)
+        o = apply_constraints(o)
+    return o
+
+
+def _optimise_racing_line(segments: List[_Segment], result: GenResult, sample_step: float,
+                          max_offset: float, length_weight: float, iterations: int,
+                          setup_strength: float = 0.0, setup_distance: float = 0.0,
+                          setup_peak_before: float = 0.0, merge_gap: float = 0.0,
+                          apex_pull: float = 0.1, settle_distance: float = 100.0):
+    """Coarse-to-fine solve: the line is first optimised on a very coarse
+    sampling (where information travels around the whole loop in a few
+    iterations), then each result is interpolated onto a finer sampling and
+    refined, down to sample_step. Returns (points, offsets, anchor_index) at
+    the finest level."""
+    import numpy as np
+    total_len = sum(seg.length for seg in segments)
+    steps = [sample_step * f for f in (16, 8, 4, 2, 1)]
+
+    prev_s = prev_o = None
+    points = offsets = None
+    anchor = 0
+    for level, step in enumerate(steps):
+        points = _build_fine_centerline(segments, step)
+        s_vals = np.array(_centerline_arclength(segments, step))
+        ranges = _segment_index_ranges(segments, step)
+        seg0_start, seg0_count = ranges[0]
+        anchor = seg0_start + seg0_count // 2  # start line: pinned to the centerline
+        linear = _crossing_linear_ranges(segments, result, step)
+
+        if prev_o is None:
+            init = np.zeros(len(points))
+        else:
+            init = np.interp(s_vals, prev_s, prev_o, period=total_len)
+
+        # coarse levels are cheap and carry the global shape -> most iterations there
+        n_iter = iterations if level == 0 else max(50, iterations // (2 ** level))
+        sw, st = _turn_targets(segments, points, step, max_offset,
+                               setup_distance, setup_peak_before, anchor, merge_gap, apex_pull,
+                               settle_distance)
+        offsets = _optimise_level(points, init, max_offset, step, length_weight,
+                                  n_iter, {anchor: 0.0}, linear,
+                                  setup_strength, sw, st)
+        prev_s, prev_o = s_vals, offsets
+    return points, list(offsets), anchor
+
+
+# Converts the user-facing entry_swing (0..~1) into the optimiser's penalty weight.
+_ENTRY_SWING_SCALE = 8e-7
 
 
 @dataclass
@@ -358,10 +506,14 @@ def generate_checkpoints(
     aggressiveness: float = 0.6,
     safety_margin: float = 6.0,
     sample_step: float = 2.0,
-    smoothing_iterations: int = 400,
-    pre_corner_swing: float = 0.4,
-    pre_corner_swing_distance: float = 50.0,
-    pre_corner_turn_in_distance: float = 25.0,
+    smoothing_iterations: int = 3000,
+    corner_cut: float = 0.0,
+    entry_swing: float = 1.0,
+    entry_swing_distance: float = 140.0,
+    entry_swing_peak: float = 70.0,
+    exit_settle_distance: float = 100.0,
+    turn_merge_gap=None,
+    apex_pull: float = 0.1,
     start_offset: float = 20.0,
 ) -> List[Checkpoint]:
     """
@@ -373,51 +525,58 @@ def generate_checkpoints(
     sample_step:                   how finely (in centerline pixels) to sample
                                    the path - smaller is more accurate and
                                    slower. 2px is plenty for track pieces this size.
-    smoothing_iterations:          how many relaxation passes to run. More gives
-                                   a smoother line; a few hundred is enough to
-                                   converge for tracks of this scale.
-    pre_corner_swing:              0 disables it entirely. Otherwise, how hard
-                                   (as a fraction of the max lateral offset) the
-                                   line is nudged toward the OUTSIDE of a corner
-                                   in the stretch immediately before it - the
-                                   classic "out" before the "in". Only ever
-                                   applied on a plain, sufficiently long
-                                   straight/crossing approach, never between
-                                   corners in a chicane, so it can't reintroduce
-                                   apex-chasing zig-zag there.
-    pre_corner_swing_distance:     how many pixels before the corner the
-                                   outward push starts building up.
-    pre_corner_turn_in_distance:   how many pixels before the corner the
-                                   outward push has fully eased off again, so
-                                   the line has already started turning back
-                                   in before it reaches the corner instead of
-                                   holding the outside line right up to the
-                                   apex and snapping in all at once. Always
-                                   kept smaller than pre_corner_swing_distance
-                                   (clamped automatically if you set it too
-                                   close to it).
-    start_offset:                  checkpoint 0 sits at the middle of the start
+    smoothing_iterations:          optimiser iterations on the coarsest level
+                                   (finer levels use fewer). A few thousand
+                                   is plenty to converge.
+    corner_cut:                    extra "shortest path" preference on top of
+                                   smoothness. 0 (default) = pure smooth,
+                                   F1-style line; larger (e.g. 1e-4) hugs the
+                                   inside of corners more and uses less width.
+    entry_swing:                   0 = off. How strongly the line is guided on
+                                   straights: back to the MIDDLE of the road
+                                   after a turn, then out to the OUTSIDE of the
+                                   next turn shortly before it (outside -
+                                   inside - outside through the turn). A soft
+                                   preference weighed against smoothness;
+                                   higher = follows it more strictly, but
+                                   swings get more abrupt. Corners turning the same way
+                                   with at most one short straight between
+                                   them count as one turn (e.g. a U-turn). Not
+                                   used between a turn and an opposite turn
+                                   that follows quickly (S-bends, staircases),
+                                   where the line takes the middle instead.
+    entry_swing_distance:          how many px before a turn the line starts
+                                   moving from the middle to the outside.
+    entry_swing_peak:              how many px before the turn the outside
+                                   pull is strongest (it lets go after that
+                                   so the line can turn in smoothly).
+    exit_settle_distance:          over how many px after a turn the line is
+                                   eased back toward the middle of the road.
+    turn_merge_gap:                max px of straight between two same-direction
+                                   corners for them to count as one turn
+                                   (default: about one straight piece).
+    apex_pull:                     how strongly the line is pulled to the
+                                   INSIDE in the middle of a turn (relative to
+                                   entry_swing). Small values are enough - the
+                                   smoothness term already finds the apex;
+                                   large values make corners look angular.
+    start_offset:                 checkpoint 0 sits at the middle of the start
                                    straight, shifted backward (against the
                                    direction of travel) by this many pixels.
     """
     segments = _build_segments(result, cfg)
-    points = _build_fine_centerline(segments, sample_step)
     max_offset = max(0.0, aggressiveness) * max(0.0, cfg.track_width / 2.0 - safety_margin)
 
     # The start line is a fixed, physical mark drawn at the exact centre of
-    # the start straight - anchor the racing line to sit exactly on the
+    # the start straight - the racing line is anchored to sit exactly on the
     # centerline right there, regardless of aggressiveness.
-    seg0_start, seg0_count = _segment_index_ranges(segments, sample_step)[0]
-    mid_idx = seg0_start + seg0_count // 2
-
-    bias = _pre_corner_swing_bias(segments, sample_step, max_offset,
-                                   pre_corner_swing_distance, pre_corner_swing,
-                                   pre_corner_turn_in_distance,
-                                   excluded_indices={mid_idx})
-    linear_ranges = _crossing_linear_ranges(segments, result, sample_step)
-
-    offsets = _relax_offsets(points, max_offset, iterations=smoothing_iterations, bias=bias,
-                              fixed={mid_idx: 0.0}, linear_ranges=linear_ranges)
+    points, offsets, mid_idx = _optimise_racing_line(
+        segments, result, sample_step, max_offset,
+        length_weight=corner_cut, iterations=smoothing_iterations,
+        setup_strength=_ENTRY_SWING_SCALE * max(0.0, entry_swing),
+        setup_distance=entry_swing_distance, setup_peak_before=entry_swing_peak,
+        merge_gap=1.1 * cfg.cell_size if turn_merge_gap is None else turn_merge_gap,
+        apex_pull=apex_pull, settle_distance=exit_settle_distance)
 
     n = len(points)
     fine = [(cx + o * nx, cy + o * ny) for (cx, cy, nx, ny), o in zip(points, offsets)]
