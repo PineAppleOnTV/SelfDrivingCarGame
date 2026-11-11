@@ -43,9 +43,14 @@ MIN_LENGTH = 10
 # have some available.
 ALLOW_CROSSINGS = True
 
+# Whether 3 corners in a row may all turn the same way (left-left-left or
+# right-right-right = a 270 degree turn). Set to False to forbid that. Mixed
+# runs like left-left-right are always allowed, however long.
+ALLOW_270_TURNS = False
+
 # Fix this to an integer to get the same set of tracks again later; leave as
 # None for a different random batch every run.
-SEED = 15
+SEED = None
 
 OUTPUT_DIR = "."
 TRACKS_DIR = os.path.join(OUTPUT_DIR, "tracks")  # all PNGs go here
@@ -127,6 +132,7 @@ def main():
         grid_size=GRID_SIZE,
         min_length=MIN_LENGTH,
         allow_crossings=ALLOW_CROSSINGS,
+        allow_270_turns=ALLOW_270_TURNS,
         seed=SEED,
     )
 

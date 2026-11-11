@@ -136,6 +136,7 @@ def generate_track(
     grid_size: Optional[Tuple[int, int]] = None,
     min_length: int = 8,
     allow_crossings: bool = True,
+    allow_270_turns: bool = True,
     max_node_visits: int = 200_000,
     rng: Optional[random.Random] = None,
 ) -> GenResult:
@@ -147,6 +148,8 @@ def generate_track(
     grid_size:    (rows, cols). If omitted, a size is guessed from piece_counts.
     min_length:   minimum number of cells in the loop.
     allow_crossings: if False, the path never reuses a cell (simple loop only).
+    allow_270_turns: if False, never place 3 corners in a row that all turn
+                     the same way (left-left-left or right-right-right).
     """
     rng = rng or random.Random()
     counts = {"straight": None, "corner": None, "crossing": None}
@@ -231,7 +234,18 @@ def generate_track(
 
     path: List[Tuple[Tuple[int, int], str]] = []
 
-    def dfs(cell, heading, length):
+    def turn_run(heading, new_heading, run_dir, run_len):
+        """Updated (direction, count) of same-direction corners in a row.
+        Returns None if this move would break the allow_270_turns rule."""
+        if new_heading == heading:
+            return (None, 0)  # straight (or crossing) resets the run
+        turn = "L" if new_heading == LEFT_OF[heading] else "R"
+        new_len = run_len + 1 if turn == run_dir else 1
+        if not allow_270_turns and new_len >= 3:
+            return None
+        return (turn, new_len)
+
+    def dfs(cell, heading, length, run_dir=None, run_len=0):
         nonlocal node_visits
         node_visits += 1
         if node_visits > max_node_visits:
@@ -247,6 +261,8 @@ def generate_track(
                 return None
             next_cell = (cell[0] + DELTA[closing_heading][0], cell[1] + DELTA[closing_heading][1])
             if next_cell != start_cell:
+                return None
+            if turn_run(heading, closing_heading, run_dir, run_len) is None:
                 return None
             token = commit_cell(cell, heading, closing_heading)
             if token is None:
@@ -268,11 +284,14 @@ def generate_track(
                 continue  # closing must go through attempt_close(), not here
             if next_cell in visited and visited[next_cell][0] != "straight":
                 continue  # can't re-enter a corner/crossing cell
+            run = turn_run(heading, new_heading, run_dir, run_len)
+            if run is None:
+                continue  # would make a 3rd same-direction corner in a row
             token = commit_cell(cell, heading, new_heading)
             if token is None:
                 continue
             path.append((cell, new_heading))
-            if dfs(next_cell, new_heading, length + 1):
+            if dfs(next_cell, new_heading, length + 1, *run):
                 return True
             path.pop()
             undo(token)
@@ -307,6 +326,7 @@ def generate_track_variants(
     grid_size: Optional[Tuple[int, int]] = None,
     min_length: int = 8,
     allow_crossings: bool = True,
+    allow_270_turns: bool = True,
     seed: Optional[int] = None,
     max_attempts: int = 200,
 ) -> List[GenResult]:
@@ -323,6 +343,7 @@ def generate_track_variants(
                 grid_size=grid_size,
                 min_length=min_length,
                 allow_crossings=allow_crossings,
+                allow_270_turns=allow_270_turns,
                 rng=rng,
             )
         except GenerationError:
